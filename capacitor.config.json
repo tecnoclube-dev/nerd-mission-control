@@ -1,0 +1,19 @@
+{
+  "appId": "br.com.nerdmc.shopee",
+  "appName": "NerdMC",
+  "webDir": ".",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1000,
+      "backgroundColor": "#0d0f14",
+      "androidSplashResourceName": "splash",
+      "showSpinner": false
+    }
+  },
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "cleartext": true
+  }
+}
