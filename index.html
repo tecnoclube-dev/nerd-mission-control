@@ -220,7 +220,9 @@ select.form-input{cursor:pointer}
         </div>
         <div class="card-body">
           <div class="upload" onclick="document.getElementById('file-input').click()">
-            <input type="file" id="file-input" accept=".csv" multiple/>
+            <!-- ⚠️ SEM filtro accept — Android registra CSV em vários MIME types e isso esconde os arquivos no seletor.
+                 Validação por extensão é feita no JS. -->
+            <input type="file" id="file-input" multiple/>
             <div class="upload-icon">📊</div>
             <div class="upload-title">Toque para importar CSV</div>
             <div class="upload-sub">BatchProductLinks...csv · múltiplos acumulam</div>
@@ -301,7 +303,7 @@ select.form-input{cursor:pointer}
           </div>
           <div class="form-group">
             <label class="form-label">ID do WhatsApp</label>
-            <input class="form-input" id="nc-id" placeholder="Ex: 120363000000000000@newsletter"/>
+            <input class="form-input" id="nc-id" placeholder="Ex: 120363425991429905@newsletter"/>
           </div>
           <div class="form-group">
             <label class="form-label">Tipo</label>
@@ -366,7 +368,7 @@ const SK_CHAN = 'nmc_channels';
 // ── DEFAULT CHANNELS ────────────────────────────────────────────────────────
 const DEFAULT_CHANNELS = [
   { id: 'ch1', name: 'TecnoClube Canal',  wid: '120363425991429905@newsletter', type: 'channel', color: '#ff6b35' },
-  { id: 'ch2', name: 'Grupo de Teste',    wid: '120363407963539220-group',       type: 'group',   color: '#4da6ff' }
+  { id: 'ch2', name: 'Grupo de Teste',    wid: '120363407963539220@g.us',        type: 'group',   color: '#4da6ff' }
 ];
 
 // ── STORAGE ─────────────────────────────────────────────────────────────────
@@ -396,46 +398,130 @@ window.addEventListener('DOMContentLoaded', load);
 
 // ── FILE INPUT ───────────────────────────────────────────────────────────────
 document.getElementById('file-input').addEventListener('change', e => {
-  Array.from(e.target.files).forEach(f => {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+
+  files.forEach(f => {
+    // Valida extensão (substituiu o filtro accept que dava bug no Android)
+    if (!f.name.toLowerCase().endsWith('.csv')) {
+      toast(`⚠️ ${f.name} não é .csv — ignorado`, 'err');
+      return;
+    }
     const r = new FileReader();
     r.onload = ev => importCSV(ev.target.result, f.name);
-    r.readAsText(f);
+    r.onerror = () => toast(`❌ Erro ao ler ${f.name}`, 'err');
+    r.readAsText(f, 'UTF-8');
   });
   e.target.value = '';
 });
 
-// ── CSV ──────────────────────────────────────────────────────────────────────
+// ── CSV PARSER (RFC 4180-ish) ───────────────────────────────────────────────
+// Aceita aspas em vírgulas E em quebras de linha (campos multiline).
+// Trata \r\n, \n, BOM e aspas escapadas ("").
 function parseCSV(text) {
-  const lines = text.trim().split('\n');
-  const hdrs = lines[0].split(',').map(h => h.trim().replace(/^\uFEFF/,'').replace(/"/g,''));
-  return lines.slice(1).filter(l=>l.trim()).map(line => {
-    const cols=[]; let cur='', inQ=false;
-    for(let c of line){ if(c==='"'){inQ=!inQ;} else if(c===','&&!inQ){cols.push(cur);cur='';} else cur+=c; }
-    cols.push(cur);
-    const o={}; hdrs.forEach((h,i)=>o[h]=(cols[i]||'').trim()); return o;
-  });
+  text = text.replace(/^\uFEFF/, '');
+  const rows = [];
+  let cur = '', row = [], inQ = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (inQ && text[i+1] === '"') { cur += '"'; i++; }
+      else inQ = !inQ;
+    } else if (c === ',' && !inQ) {
+      row.push(cur); cur = '';
+    } else if ((c === '\n' || c === '\r') && !inQ) {
+      if (c === '\r' && text[i+1] === '\n') i++;
+      row.push(cur); cur = '';
+      // ignora linhas completamente vazias
+      if (row.length > 1 || (row[0] && row[0].trim() !== '')) rows.push(row);
+      row = [];
+    } else {
+      cur += c;
+    }
+  }
+  // última linha sem newline final
+  if (cur !== '' || row.length) {
+    row.push(cur);
+    if (row.length > 1 || (row[0] && row[0].trim() !== '')) rows.push(row);
+  }
+
+  if (!rows.length) return [];
+
+  const hdrs = rows[0].map(h => h.trim().replace(/^"|"$/g, ''));
+  return rows.slice(1)
+    .filter(r => r.some(c => c && c.trim()))
+    .map(cols => {
+      const o = {};
+      hdrs.forEach((h, i) => o[h] = (cols[i] || '').trim());
+      return o;
+    });
+}
+
+function parseShopeeIds(url) {
+  if (!url) return { shop_id: '', item_id: '' };
+  let m = url.match(/\/product\/(\d+)\/(\d+)/);
+  if (m) return { shop_id: m[1], item_id: m[2] };
+  m = url.match(/i\.(\d+)\.(\d+)/);
+  if (m) return { shop_id: m[1], item_id: m[2] };
+  return { shop_id: '', item_id: '' };
 }
 
 function importCSV(text, fname) {
   try {
     const rows = parseCSV(text);
-    const existing = new Set(products.map(p=>p.item_id));
-    let added = 0;
+
+    if (!rows.length) {
+      toast(`⚠️ ${fname}: CSV vazio ou ilegível`, 'err');
+      return;
+    }
+
+    // Diagnóstico: detecta se as colunas esperadas existem
+    const sample = rows[0] || {};
+    const hasItemId = 'Item Id' in sample || 'item_id' in sample;
+    if (!hasItemId) {
+      const cols = Object.keys(sample).slice(0, 5).join(' | ');
+      toast(`❌ ${fname}: coluna "Item Id" não encontrada. Colunas: ${cols}`, 'err');
+      return;
+    }
+
+    const existing = new Set(products.map(p => p.item_id));
+    let added = 0, skippedDup = 0, skippedNoId = 0;
+
     rows.forEach(r => {
-      const id = r['Item Id']||r['item_id']||'';
-      if (!id || existing.has(id)) return;
+      const id = r['Item Id'] || r['item_id'] || '';
+      if (!id) { skippedNoId++; return; }
+      if (existing.has(id)) { skippedDup++; return; }
+
+      const productUrl = r['Product Link'] || '';
+      const ids = parseShopeeIds(productUrl);
       products.push({
-        item_id: id, name: r['Item Name']||'', price: r['Price']||'',
-        shop: r['Shop Name']||'', commission_rate: r['Commission Rate']||'',
-        commission_value: r['Commission']||'', sales: parseInt(r['Sales']||0),
-        product_url: r['Product Link']||'', affiliate_url: r['Offer Link']||'',
+        item_id: id, shop_id: ids.shop_id,
+        name: r['Item Name'] || '', price: r['Price'] || '',
+        shop: r['Shop Name'] || '', commission_rate: r['Commission Rate'] || '',
+        commission_value: r['Commission'] || '', sales: parseInt(r['Sales'] || 0),
+        product_url: productUrl, affiliate_url: r['Offer Link'] || '',
+        image: r['Image'] || r['image'] || '',
         status: 'pending', added_at: Date.now(), sent_at: null, sent_to: null
       });
       existing.add(id); added++;
     });
+
     save(); renderAll();
-    toast(`✅ ${added} produtos importados de ${fname}`, 'ok');
-  } catch(err) { toast('❌ Erro ao importar: '+err.message, 'err'); }
+
+    let msg = `✅ ${added} importados de ${fname}`;
+    if (skippedDup)   msg += ` · ${skippedDup} duplicados`;
+    if (skippedNoId)  msg += ` · ${skippedNoId} sem ID`;
+    toast(msg, added > 0 ? 'ok' : 'info');
+
+    // Se nada foi adicionado, alerta com mais força
+    if (added === 0 && rows.length > 0) {
+      toast(`⚠️ Nenhum produto novo. ${rows.length} linhas lidas, ${skippedDup} já existiam, ${skippedNoId} sem ID.`, 'err');
+    }
+  } catch(err) {
+    toast('❌ Erro ao importar: ' + err.message, 'err');
+    console.error('importCSV error', err);
+  }
 }
 
 // ── RENDER ───────────────────────────────────────────────────────────────────
@@ -576,7 +662,7 @@ function switchTab(name) {
 function saveConfig() { saveCfg(); toast('✅ Configuração salva!', 'ok'); }
 
 // ── CHANNELS ──────────────────────────────────────────────────────────────────
-function showAddChannel() { document.getElementById('add-channel-card').style.display=''; }
+function showAddChannel() { document.getElementById('add-channel-card').style.display=''; document.getElementById('scroll-area').scrollTop = 9999; }
 function hideAddChannel() { document.getElementById('add-channel-card').style.display='none'; }
 
 function addChannel() {
@@ -599,6 +685,56 @@ function removeChannel(id) {
 }
 
 // ── SEND ──────────────────────────────────────────────────────────────────────
+
+// Busca imagem do produto ANTES de enviar — direto do celular, que passa sem anti-bot
+async function fetchShopeeImage(product) {
+  if (product.image) return product.image;
+
+  const shopId = product.shop_id;
+  const itemId = product.item_id;
+  const productUrl = product.product_url;
+
+  if (shopId && itemId) {
+    try {
+      const url = `https://shopee.com.br/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`;
+      const res = await fetch(url, {
+        headers: {
+          'X-API-SOURCE': 'pc',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-Shopee-Language': 'pt-BR'
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const hash = data?.data?.image || data?.data?.images?.[0];
+        if (hash) return 'https://down-br.img.susercontent.com/file/' + hash;
+      }
+    } catch(e) {}
+  }
+
+  if (productUrl) {
+    try {
+      const res = await fetch('https://r.jina.ai/' + productUrl, {
+        headers: { 'Accept': 'text/plain' }
+      });
+      if (res.ok) {
+        const text = await res.text();
+        const patterns = [
+          /!\[[^\]]*\]\((https?:\/\/[^)]*susercontent[^)]+)\)/i,
+          /(https?:\/\/[a-z0-9.-]*susercontent\.com\/file\/[a-zA-Z0-9_-]+)/i,
+          /og:image[^"']*["']\s*content=["']([^"']+)/i
+        ];
+        for (const pat of patterns) {
+          const m = text.match(pat);
+          if (m?.[1]) return m[1];
+        }
+      }
+    } catch(e) {}
+  }
+
+  return '';
+}
+
 async function sendSelected() {
   const webhook = document.getElementById('cfg-webhook').value.trim();
   if (!webhook) { toast('⚠️ Configure o webhook na aba ⚙️ Config', 'err'); switchTab('config'); return; }
@@ -606,7 +742,6 @@ async function sendSelected() {
   const defaultDest = document.getElementById('cfg-default-dest').value;
   let destChannel = channels.find(c=>c.id===defaultDest);
 
-  // Se não há destino padrão e há mais de 1 canal, pergunta
   if (!destChannel) {
     if (channels.length===1) { destChannel = channels[0]; }
     else {
@@ -625,22 +760,41 @@ async function sendSelected() {
   const detail = document.getElementById('prog-detail');
   prog.classList.add('active');
   document.getElementById('send-btn').disabled = true;
-  detail.textContent = `Enviando ${toSend.length} produto(s)...`;
-  fill.style.width = '20%';
+
+  detail.textContent = `🖼️ Buscando imagens de ${toSend.length} produto(s)...`;
+  fill.style.width = '10%';
+  let okImgs = 0;
+  for (let i=0; i<toSend.length; i++) {
+    const p = toSend[i];
+    const img = await fetchShopeeImage(p);
+    if (img) {
+      p.image = img;
+      const prod = products.find(x=>x.item_id===p.item_id);
+      if (prod) prod.image = img;
+      okImgs++;
+    }
+    fill.style.width = (10 + (i+1)/toSend.length * 40) + '%';
+    detail.textContent = `🖼️ Imagens: ${okImgs}/${i+1} (de ${toSend.length})`;
+  }
+  save();
+
+  detail.textContent = `📤 Enviando ${toSend.length} produto(s) (${okImgs} com imagem)...`;
+  fill.style.width = '55%';
 
   const payload = {
     source: 'shopee_manual',
     destination: { id: destChannel.id, name: destChannel.name, wid: destChannel.wid, type: destChannel.type },
     total: toSend.length,
     products: toSend.map(p=>({
-      id: p.item_id, name: p.name, price: p.price, shop: p.shop,
+      id: p.item_id, shop_id: p.shop_id||'', name: p.name, price: p.price, shop: p.shop,
       commission_rate: p.commission_rate, commission_value: p.commission_value,
-      sales: p.sales, product_url: p.product_url, affiliate_url: p.affiliate_url
+      sales: p.sales, product_url: p.product_url, affiliate_url: p.affiliate_url,
+      image: p.image||''
     }))
   };
 
   try {
-    fill.style.width = '50%';
+    fill.style.width = '75%';
     const res = await fetch(webhook, {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
@@ -653,10 +807,10 @@ async function sendSelected() {
       });
       selectedIds.clear(); save();
       fill.style.width = '100%';
-      detail.textContent = `✅ ${toSend.length} produto(s) enviados para ${destChannel.name}!`;
-      setTimeout(()=>{ prog.classList.remove('active'); fill.style.width='0'; }, 3000);
+      detail.textContent = `✅ ${toSend.length} enviados · ${okImgs} com imagem · destino: ${destChannel.name}`;
+      setTimeout(()=>{ prog.classList.remove('active'); fill.style.width='0'; }, 3500);
       renderAll();
-      toast(`🚀 ${toSend.length} produto(s) enviados!`, 'ok');
+      toast(`🚀 ${toSend.length} produto(s) enviados! ${okImgs} com imagem.`, 'ok');
     } else {
       prog.classList.remove('active');
       toast(`❌ n8n retornou erro ${res.status}`, 'err');
@@ -681,7 +835,6 @@ function clearSentStatus() {
 function fmtDate(ts) {
   return new Date(ts).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
 }
-function showAddChannel() { document.getElementById('add-channel-card').style.display=''; document.getElementById('scroll-area').scrollTop = 9999; }
 function toast(msg, type='info') {
   const c = document.getElementById('toasts');
   const t = document.createElement('div');
