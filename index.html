@@ -6,9 +6,9 @@
 <meta name="mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<meta name="apple-mobile-web-app-title" content="NerdMC"/>
+<meta name="apple-mobile-web-app-title" content="NerdMC v4"/>
 <meta name="theme-color" content="#ff6b35"/>
-<title>Nerd Mission Control</title>
+<title>NerdMC v4 - Mission Control</title>
 <link rel="manifest" href="manifest.json"/>
 <link rel="apple-touch-icon" href="icon-192.png"/>
 <link rel="icon" type="image/png" href="icon-192.png"/>
@@ -188,8 +188,8 @@ select.form-input{cursor:pointer}
     <div class="header-row">
       <div class="logo">🛸</div>
       <div class="logo-info">
-        <div class="logo-name">NERD MISSION CONTROL</div>
-        <div class="logo-sub">Shopee Afiliados · Curadoria</div>
+        <div class="logo-name">NERD MISSION CONTROL <span style="color:#39d98a;font-size:10px;background:#39d98a28;padding:1px 6px;border-radius:8px;margin-left:4px">v4</span></div>
+        <div class="logo-sub">Shopee Afiliados · Curadoria · Build 4</div>
       </div>
     </div>
     <div class="stats-row">
@@ -797,16 +797,21 @@ async function tryJina(product) {
 async function fetchShopeeImage(product) {
   if (product.image) return product.image;
 
-  // Promise.any retorna o PRIMEIRO sucesso. Se todas falharem, lança AggregateError.
+  // Marca cada estratégia pra saber qual venceu (ajuda debug)
+  const tag = (name, fn) => fn().then(img => ({ name, img })).catch(e => Promise.reject({ name, err: e.message }));
+
   try {
-    const img = await Promise.any([
-      tryApiV4(product),
-      tryShortlinkRedirect(product),
-      tryJina(product)
+    const result = await Promise.any([
+      tag('apiV4',     () => tryApiV4(product)),
+      tag('shortlink', () => tryShortlinkRedirect(product)),
+      tag('jina',      () => tryJina(product))
     ]);
-    return img || '';
+    console.log('[NerdMC v4] imagem via', result.name, '→', result.img);
+    return result.img || '';
   } catch (e) {
-    // Todas falharam
+    // AggregateError com todas as falhas
+    const errs = (e.errors || []).map(x => x.name + ':' + x.err).join(' | ');
+    console.warn('[NerdMC v4] todas falharam:', errs);
     return '';
   }
 }

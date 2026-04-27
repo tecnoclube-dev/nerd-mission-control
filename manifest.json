@@ -1,14 +1,25 @@
 {
-  "name": "Nerd Mission Control",
-  "short_name": "NerdMC",
-  "description": "Shopee Afiliados — Curadoria Manual",
-  "start_url": "./index.html",
+  "name": "NerdMC v4 - Mission Control",
+  "short_name": "NerdMC v4",
+  "description": "Curadoria manual Shopee Afiliados — versão 4 com busca de imagem robusta",
+  "start_url": "./",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#0d0f14",
   "theme_color": "#ff6b35",
-  "orientation": "portrait-primary",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
-  ]
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "shopping", "utilities"]
 }
