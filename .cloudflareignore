@@ -1,0 +1,11 @@
+node_modules
+android
+.gradle
+build
+*.apk
+package.json
+package-lock.json
+bun.lockb
+capacitor.config.json
+build-android.sh
+shopee_manual_v3.json
