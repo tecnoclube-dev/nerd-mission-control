@@ -448,7 +448,14 @@ function parseCSV(text) {
 
   if (!rows.length) return [];
 
-  const hdrs = rows[0].map(h => h.trim().replace(/^"|"$/g, ''));
+  // Limpa cada header: aspas, BOM (\uFEFF) que pode aparecer no meio se readAsText falhar,
+  // espaços invisíveis e quebras residuais
+  const hdrs = rows[0].map(h =>
+    h.replace(/^\uFEFF/, '')      // BOM no início
+     .replace(/\uFEFF/g, '')       // BOM em qualquer lugar
+     .replace(/^"|"$/g, '')        // aspas
+     .trim()
+  );
   return rows.slice(1)
     .filter(r => r.some(c => c && c.trim()))
     .map(cols => {
@@ -476,10 +483,21 @@ function importCSV(text, fname) {
       return;
     }
 
-    // Diagnóstico: detecta se as colunas esperadas existem
+    // ── Helper: pega valor de uma linha tentando múltiplos nomes de coluna,
+    // ignorando case, BOM, espaços invisíveis e variações com underscore
+    const norm = s => String(s||'').replace(/[\uFEFF\u200B-\u200D\u00A0]/g,'').trim().toLowerCase().replace(/[\s_]+/g,'');
+    function pick(row, ...names) {
+      const wanted = names.map(norm);
+      for (const k of Object.keys(row)) {
+        if (wanted.includes(norm(k))) return row[k];
+      }
+      return '';
+    }
+
+    // Diagnóstico: detecta se a coluna ID existe (em qualquer variação)
     const sample = rows[0] || {};
-    const hasItemId = 'Item Id' in sample || 'item_id' in sample;
-    if (!hasItemId) {
+    const idTest = pick(sample, 'Item Id', 'item_id', 'itemid');
+    if (idTest === '' && !Object.keys(sample).some(k => norm(k) === 'itemid')) {
       const cols = Object.keys(sample).slice(0, 5).join(' | ');
       toast(`❌ ${fname}: coluna "Item Id" não encontrada. Colunas: ${cols}`, 'err');
       return;
@@ -489,19 +507,24 @@ function importCSV(text, fname) {
     let added = 0, skippedDup = 0, skippedNoId = 0;
 
     rows.forEach(r => {
-      const id = r['Item Id'] || r['item_id'] || '';
+      const id = pick(r, 'Item Id', 'item_id', 'itemid');
       if (!id) { skippedNoId++; return; }
       if (existing.has(id)) { skippedDup++; return; }
 
-      const productUrl = r['Product Link'] || '';
+      const productUrl = pick(r, 'Product Link', 'product_url', 'productlink');
       const ids = parseShopeeIds(productUrl);
       products.push({
-        item_id: id, shop_id: ids.shop_id,
-        name: r['Item Name'] || '', price: r['Price'] || '',
-        shop: r['Shop Name'] || '', commission_rate: r['Commission Rate'] || '',
-        commission_value: r['Commission'] || '', sales: parseInt(r['Sales'] || 0),
-        product_url: productUrl, affiliate_url: r['Offer Link'] || '',
-        image: r['Image'] || r['image'] || '',
+        item_id: id,
+        shop_id: ids.shop_id,
+        name: pick(r, 'Item Name', 'item_name', 'itemname'),
+        price: pick(r, 'Price'),
+        shop: pick(r, 'Shop Name', 'shop_name', 'shopname'),
+        commission_rate: pick(r, 'Commission Rate', 'commission_rate'),
+        commission_value: pick(r, 'Commission', 'commission_value'),
+        sales: parseInt(pick(r, 'Sales') || 0),
+        product_url: productUrl,
+        affiliate_url: pick(r, 'Offer Link', 'affiliate_url', 'offerlink'),
+        image: pick(r, 'Image', 'image_url', 'imageurl'),
         status: 'pending', added_at: Date.now(), sent_at: null, sent_to: null
       });
       existing.add(id); added++;

@@ -1,4 +1,4 @@
-const CACHE = 'nerd-mc-v2';
+const CACHE = 'nerd-mc-v3';
 const ASSETS = ['./index.html', './manifest.json'];
 
 self.addEventListener('install', e => {
