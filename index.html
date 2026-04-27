@@ -709,53 +709,106 @@ function removeChannel(id) {
 
 // ── SEND ──────────────────────────────────────────────────────────────────────
 
-// Busca imagem do produto ANTES de enviar — direto do celular, que passa sem anti-bot
+// ═══════════════════════════════════════════════════════════════
+// Busca imagem do produto — ANTES de enviar, direto do celular.
+// O IP residencial do celular passa pelas proteções anti-bot que
+// bloqueiam o servidor (Railway/n8n).
+//
+// Estratégia: 3 tentativas EM PARALELO. A primeira que retornar
+// imagem válida vence. Se todas falharem, retorna vazio e o n8n
+// envia como texto (preview do WhatsApp pega thumb genérica).
+// ═══════════════════════════════════════════════════════════════
+
+// Regex pra detectar URL de imagem da Shopee no HTML/markdown
+const SHOPEE_IMG_PATTERNS = [
+  /!\[[^\]]*\]\((https?:\/\/[^)]*susercontent[^)\s]+)\)/i,
+  /(https?:\/\/[a-z0-9.-]*susercontent\.com\/file\/[a-zA-Z0-9_-]{20,})/i,
+  /og:image[^"']*["']\s*content=["']([^"']+susercontent[^"']+)/i,
+  /"image"\s*:\s*"([a-zA-Z0-9_-]{20,})"/i
+];
+
+function extractImage(text) {
+  if (!text || typeof text !== 'string') return '';
+  for (const pat of SHOPEE_IMG_PATTERNS) {
+    const m = text.match(pat);
+    if (m?.[1]) {
+      let url = m[1].split('?')[0].split('"')[0];
+      // Se for só o hash, monta a URL completa
+      if (!/^https?:/.test(url) && /^[a-zA-Z0-9_-]{20,}$/.test(url)) {
+        url = 'https://down-br.img.susercontent.com/file/' + url;
+      }
+      return url;
+    }
+  }
+  return '';
+}
+
+// ── Estratégia 1: API v4 oficial da Shopee ──
+async function tryApiV4(product) {
+  if (!product.shop_id || !product.item_id) throw new Error('no ids');
+  const url = `https://shopee.com.br/api/v4/item/get?itemid=${product.item_id}&shopid=${product.shop_id}`;
+  const res = await fetch(url, {
+    headers: {
+      'X-API-SOURCE': 'pc',
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-Shopee-Language': 'pt-BR',
+      'Referer': 'https://shopee.com.br/'
+    }
+  });
+  if (!res.ok) throw new Error('api ' + res.status);
+  const data = await res.json();
+  const hash = data?.data?.image || data?.data?.images?.[0];
+  if (!hash) throw new Error('no hash');
+  return 'https://down-br.img.susercontent.com/file/' + hash;
+}
+
+// ── Estratégia 2: seguir o shortlink s.shopee.com.br + extrair og:image ──
+// O celular tem cookies da Shopee, então o redirect resolve a página real.
+async function tryShortlinkRedirect(product) {
+  const link = product.affiliate_url || product.product_url;
+  if (!link) throw new Error('no url');
+  // Tenta com no-cors fallback se CORS bloquear
+  const res = await fetch(link, {
+    redirect: 'follow',
+    headers: { 'Accept': 'text/html,application/xhtml+xml' }
+  });
+  if (!res.ok) throw new Error('shortlink ' + res.status);
+  const html = await res.text();
+  const img = extractImage(html);
+  if (!img) throw new Error('no img in html');
+  return img;
+}
+
+// ── Estratégia 3: Jina Reader (fallback) ──
+async function tryJina(product) {
+  const link = product.product_url || product.affiliate_url;
+  if (!link) throw new Error('no url');
+  const res = await fetch('https://r.jina.ai/' + link, {
+    headers: { 'Accept': 'text/plain' }
+  });
+  if (!res.ok) throw new Error('jina ' + res.status);
+  const text = await res.text();
+  const img = extractImage(text);
+  if (!img) throw new Error('no img in jina');
+  return img;
+}
+
+// Retorna a primeira que sair com sucesso. Se todas falharem, retorna ''.
 async function fetchShopeeImage(product) {
   if (product.image) return product.image;
 
-  const shopId = product.shop_id;
-  const itemId = product.item_id;
-  const productUrl = product.product_url;
-
-  if (shopId && itemId) {
-    try {
-      const url = `https://shopee.com.br/api/v4/item/get?itemid=${itemId}&shopid=${shopId}`;
-      const res = await fetch(url, {
-        headers: {
-          'X-API-SOURCE': 'pc',
-          'X-Requested-With': 'XMLHttpRequest',
-          'X-Shopee-Language': 'pt-BR'
-        }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const hash = data?.data?.image || data?.data?.images?.[0];
-        if (hash) return 'https://down-br.img.susercontent.com/file/' + hash;
-      }
-    } catch(e) {}
+  // Promise.any retorna o PRIMEIRO sucesso. Se todas falharem, lança AggregateError.
+  try {
+    const img = await Promise.any([
+      tryApiV4(product),
+      tryShortlinkRedirect(product),
+      tryJina(product)
+    ]);
+    return img || '';
+  } catch (e) {
+    // Todas falharam
+    return '';
   }
-
-  if (productUrl) {
-    try {
-      const res = await fetch('https://r.jina.ai/' + productUrl, {
-        headers: { 'Accept': 'text/plain' }
-      });
-      if (res.ok) {
-        const text = await res.text();
-        const patterns = [
-          /!\[[^\]]*\]\((https?:\/\/[^)]*susercontent[^)]+)\)/i,
-          /(https?:\/\/[a-z0-9.-]*susercontent\.com\/file\/[a-zA-Z0-9_-]+)/i,
-          /og:image[^"']*["']\s*content=["']([^"']+)/i
-        ];
-        for (const pat of patterns) {
-          const m = text.match(pat);
-          if (m?.[1]) return m[1];
-        }
-      }
-    } catch(e) {}
-  }
-
-  return '';
 }
 
 async function sendSelected() {
